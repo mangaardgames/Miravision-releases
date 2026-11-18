@@ -1,5 +1,6 @@
 # Udgiv en ny version: filerne sendes til grenen "upload" (installer i dele + update.json).
 # Workflowet samler installeren, tjekker størrelse og SHA-256 mod update.json, laver udgivelsen og sletter grenen.
+# Testversioner (x.y.z-beta.N) bliver en "prerelease", og update.json lægges også i udgivelsen "beta" (beta-kanalen).
 name: Udgiv version
 on:
   push:
@@ -7,6 +8,7 @@ on:
     paths: [upload/update.json]
 permissions:
   contents: write
+concurrency: udgivelse
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -22,23 +24,33 @@ jobs:
           name=$(cat filename.txt)
           cat part-* > "$name"
           python3 - "$name" <<'PY'
-          import hashlib, json, sys, pathlib
+          import hashlib, json, os, pathlib, re, sys
           f = pathlib.Path(sys.argv[1]); m = json.loads(json.load(open("update.json"))["manifest"])
           data = f.read_bytes()
           assert data[:2] == b"MZ", "ikke et Windows-program"
           assert len(data) == m["size"], f"størrelse {len(data)} != {m['size']}"
           assert hashlib.sha256(data).hexdigest() == m["sha256"], "SHA-256 passer ikke"
           assert m["url"].endswith("/" + f.name), "filnavn passer ikke med update.json"
-          print("version", m["version"], "OK")
-          open(__import__("os").environ["GITHUB_OUTPUT"], "a").write(f"version={m['version']}\nname={f.name}\n")
+          beta = bool(re.search(r"-(beta|rc)", m["version"]))
+          print("version", m["version"], "testversion" if beta else "", "OK")
+          open(os.environ["GITHUB_OUTPUT"], "a").write(f"version={m['version']}\nname={f.name}\nbeta={'1' if beta else ''}\n")
           PY
       - name: Lav udgivelsen
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -e
           cd upload
-          gh release create "v${{ steps.check.outputs.version }}" "${{ steps.check.outputs.name }}" update.json \
-            --target main --title "Mira Vision ${{ steps.check.outputs.version }}" --notes-file notes.md --latest
+          tag="v${{ steps.check.outputs.version }}"
+          if gh release view "$tag" >/dev/null 2>&1; then echo "$tag findes allerede"; exit 1; fi
+          if [ -n "${{ steps.check.outputs.beta }}" ]; then flag=--prerelease; else flag=--latest; fi
+          gh release create "$tag" "${{ steps.check.outputs.name }}" update.json \
+            --target main --title "Mira Vision ${{ steps.check.outputs.version }}" --notes-file notes.md $flag
+          if [ -n "${{ steps.check.outputs.beta }}" ]; then
+            gh release view beta >/dev/null 2>&1 || gh release create beta --target main --prerelease \
+              --title "Beta-kanal" --notes "update.json her peger på den nyeste testversion af Mira Vision."
+            gh release upload beta update.json --clobber
+          fi
       - name: Ryd op
         if: always()
         run: git push origin --delete upload || true
